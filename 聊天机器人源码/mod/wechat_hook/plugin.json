@@ -1,0 +1,7 @@
+{
+  "name": "wechat_hook",
+  "title": "微信 Hook",
+  "description": "通过 hook（WeChat-Hook version.dll / wcferry）接入微信，需电脑端微信已登录。",
+  "version": "1.1.0",
+  "author": "core"
+}

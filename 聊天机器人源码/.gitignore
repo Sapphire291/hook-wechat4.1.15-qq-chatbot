@@ -1,0 +1,39 @@
+# ==== 运行时数据（绝不提交；只匹配根目录，避免误伤 src/memory 等模块）====
+/config.json
+/data/
+/memory/
+/WID/
+/EMOJE/
+/logs/
+/backup/
+/wechatauto_logs/
+/runtime/
+
+# ==== 构建产物 ====
+/dist/
+/build/
+/build_last.log
+*.spec.bak
+
+# ==== 测试 / 缓存（任意层级）====
+.test_tmp/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ==== 编辑器 / 系统 ====
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ==== 密钥 / 证书 ====
+*.pem
+*.key
+.env
+
+# ==== 默认表情库（约 147MB、来自个人微信收藏素材，不入库；仅保留说明）====
+/assets/emoji/*
+!/assets/emoji/README.md

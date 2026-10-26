@@ -1,0 +1,7 @@
+{
+  "name": "napcat",
+  "title": "NapCat(QQ)",
+  "description": "内置 NapCat：自动解压、注入 QQ、扫码登录、自动配置 OneBot（QQ 接入）。",
+  "version": "1.0.0",
+  "author": "core"
+}
