@@ -521,8 +521,8 @@ def main():
                   and main_call["kwargs"].get("reasoning_effort") == "high", main_call["kwargs"])
             check("联网命中 → 回复已发送", len(adapter.sent) == 1, adapter.sent)
             # 让主 AI 明确知道“可以联网”（宪章第 7 条 + 本轮联网提醒）
-            check("系统提示包含联网能力说明（宪章第 7 条）",
-                  "我可以联网检索" in main_call["system_prompt"],
+            check("系统提示包含联网能力说明（宪章第 8 条）",
+                  "系统会先联网搜索" in main_call["system_prompt"],
                   main_call["system_prompt"][:300])
             check("系统提示包含本轮联网提醒",
                   "【联网提醒】" in main_call["system_prompt"])

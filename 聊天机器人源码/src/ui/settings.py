@@ -62,7 +62,7 @@ class SettingsPanel(ttk.Frame):
     """设置面板：微信 AI / QQ AI / 白名单 / 回复设置 四个子页。"""
 
     def __init__(self, master, on_save: Optional[Callable[[AppConfig], None]] = None,
-                 chat_fetcher=None, sticker_fetcher=None, sticker_favoriter=None, napcat=None,
+                 chat_fetcher=None, sticker_fetcher=None, sticker_favoriter=None,
                  memory_store=None, wechat_plugin=None, bot_controller=None):
         super().__init__(master, padding=6)
         self.on_save = on_save
@@ -70,11 +70,11 @@ class SettingsPanel(ttk.Frame):
         self.chat_fetcher = chat_fetcher
         self.sticker_fetcher = sticker_fetcher
         self.sticker_favoriter = sticker_favoriter
-        self.napcat = napcat
         self.memory_store = memory_store
         self.wechat_plugin = wechat_plugin
         self._qr_photo = None
         self._scroll_pairs = []
+        self._sys_prompts = {}
         self._wl_contacts_cache = None
         self._build()
 
@@ -142,7 +142,9 @@ class SettingsPanel(ttk.Frame):
 
     def _build_ai(self, parent, key: str) -> None:
         """构建一个平台的 AI 配置表单（key: 'wx' 或 'qq'）。"""
-        ttk.Label(parent, text="底层提示词（System Prompt）").pack(anchor="w")
+        ttk.Label(parent, text="底层提示词（自我层 SELF.md）").pack(anchor="w")
+        ttk.Label(parent, text="每轮注入；保存设置后写回 memory/<平台>/SELF.md",
+                  foreground="#888").pack(anchor="w")
         prompt_frame = ttk.Frame(parent)
         prompt_frame.pack(fill="x", pady=(0, 8))
         prompt = tk.Text(prompt_frame, height=13, wrap="word")
@@ -150,7 +152,7 @@ class SettingsPanel(ttk.Frame):
         prompt.configure(yscrollcommand=prompt_sb.set)
         prompt.pack(side="left", fill="both", expand=True)
         prompt_sb.pack(side="right", fill="y")
-        setattr(self, f"{key}_prompt", prompt)
+        setattr(self, f"{key}_self_prompt", prompt)
 
         grid = ttk.Frame(parent)
         grid.pack(fill="x")
@@ -179,7 +181,7 @@ class SettingsPanel(ttk.Frame):
                    command=lambda: self._open_echo_window(key)).pack(anchor="w", pady=(10, 0))
 
         if key == "qq":
-            self._build_login_section(parent)
+            pass
         elif key == "wx":
             self._build_wechat_section(parent)
 
@@ -341,23 +343,6 @@ class SettingsPanel(ttk.Frame):
         # ECHO 记忆目录由平台固定（memory/wechatMM、memory/QQMM），不再接受手改路径。
         pass
 
-    def _build_login_section(self, parent) -> None:
-        ttk.Separator(parent, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(parent, text="QQ 登录状态（NapCat 后台常驻）", font=("", 10, "bold")).pack(anchor="w")
-        self.napcat_status = ttk.Label(parent, text="未启动", font=("", 11))
-        self.napcat_status.pack(anchor="w", pady=4)
-        qr_row = ttk.Frame(parent)
-        qr_row.pack(pady=4)
-        self.napcat_qr = ttk.Label(qr_row, text="")
-        self.napcat_qr.pack(side="left")
-        self.napcat_qr.bind("<Button-1>", self._on_qr_click)
-        self.napcat_qr.configure(cursor="hand2")
-        self.napcat_refresh_btn = ttk.Button(qr_row, text="刷新二维码", command=self._on_qr_click)
-        self.napcat_refresh_btn.pack(side="left", padx=(12, 0), anchor="n")
-        ttk.Label(parent, text="（点击二维码或「刷新二维码」按钮可重新生成）", foreground="#888").pack()
-        self.napcat_token = ttk.Label(parent, text="", foreground="#888")
-        self.napcat_token.pack()
-
     def _build_wechat_section(self, parent) -> None:
         """「微信 AI」页里的微信连接区块（hook 接入）。"""
         ttk.Separator(parent, orient="horizontal").pack(fill="x", pady=10)
@@ -415,73 +400,6 @@ class SettingsPanel(ttk.Frame):
             self.wechat_conn_status.config(text=msg, foreground="#2a7d2a" if ok else "#b33")
         except Exception:
             pass
-
-    def _on_qr_click(self, event=None) -> None:
-        """点击二维码：调用 NapCat 接口刷新二维码。"""
-        if self.napcat is None:
-            return
-        try:
-            self.napcat_status.config(text="正在刷新二维码…")
-        except Exception:
-            pass
-        threading.Thread(target=self._do_refresh_qr, daemon=True).start()
-
-    def _do_refresh_qr(self) -> None:
-        ok = False
-        try:
-            ok = bool(self.napcat.refresh_login())
-        except Exception:
-            ok = False
-        msg = "二维码已刷新" if ok else "刷新失败，请检查 NapCat 是否运行"
-        try:
-            self.after(0, lambda m=msg: self._on_refresh_done(m))
-        except Exception:
-            pass
-
-    def _on_refresh_done(self, msg: str) -> None:
-        try:
-            self.napcat_status.config(text=msg)
-            self._show_qr(self.napcat.qrcode_path())
-        except Exception:
-            pass
-
-    def update_napcat_status(self, napcat=None) -> None:
-        """由主界面轮询调用，刷新 QQ 登录状态与二维码。"""
-        napcat = napcat or self.napcat
-        if napcat is None or not hasattr(self, "napcat_status"):
-            return
-        phase = napcat.phase
-        text = {
-            "idle": "准备中…",
-            "starting": "正在启动 NapCat…",
-            "need_login": "请用手机 QQ 扫码登录",
-            "configuring": "登录成功，正在配置…",
-            "connected": "已登录，机器人就绪",
-            "failed": "启动失败（请检查 QQ 是否已安装）",
-        }.get(phase, phase)
-        self.napcat_status.config(text=text)
-        if phase == "need_login":
-            self._show_qr(napcat.qrcode_path())
-        else:
-            self._show_qr("")
-        tok = napcat.webui_token()
-        self.napcat_token.config(text=f"登录密钥：{tok}" if tok else "")
-
-    def _show_qr(self, path: str) -> None:
-        if not _HAS_PIL or not path or not os.path.isfile(path):
-            self.napcat_qr.config(image="", text="")
-            self._qr_photo = None
-            return
-        try:
-            img = Image.open(path).convert("L")
-            # 1-bit 二维码必须用最近邻(NEAREST)整数倍放大，平滑插值会糊掉导致扫不出来
-            scale = max(2, 320 // max(img.width, img.height))
-            img = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
-            self._qr_photo = ImageTk.PhotoImage(img)
-            self.napcat_qr.config(image=self._qr_photo, text="")
-        except Exception:
-            self.napcat_qr.config(image="", text="")
-            self._qr_photo = None
 
     def _refresh_models(self, key: str) -> None:
         """拉取该平台 API 的可用模型列表，填充到下拉框。"""
@@ -1627,9 +1545,46 @@ class SettingsPanel(ttk.Frame):
     # ------------------------------------------------------------------ #
     # 数据装载 / 收集
     # ------------------------------------------------------------------ #
+    def _self_path(self, key: str) -> str:
+        from ..core.paths import platform_memory_dir
+        return os.path.join(platform_memory_dir("wechat" if key == "wx" else "qq"), "SELF.md")
+
+    def _sync_self_layers(self, cfg: AppConfig) -> None:
+        """保存配置时把 UI 的底层提示词写回各平台 SELF.md，保证立即持续生效。"""
+        from ..core.paths import platform_memory_dir
+        for pv, ai in (("wechat", cfg.wechat_ai), ("qq", cfg.qq_ai)):
+            try:
+                root = platform_memory_dir(pv)
+                os.makedirs(root, exist_ok=True)
+                p = os.path.join(root, "SELF.md")
+                tmp = p + ".tmp"
+                box = getattr(self, ("wx" if pv == "wechat" else "qq") + "_self_prompt", None)
+                if box is not None:
+                    text = box.get("1.0", tk.END).strip()
+                else:
+                    text = str(getattr(ai, "system_prompt", "") or "").strip()
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(text + ("\n" if text else ""))
+                os.replace(tmp, p)
+            except Exception as e:
+                print("[self] sync failed: %r" % (e,), flush=True)
+
     def _load_ai(self, key: str, ai: PlatformAIConfig) -> None:
-        getattr(self, f"{key}_prompt").delete("1.0", tk.END)
-        getattr(self, f"{key}_prompt").insert("1.0", ai.system_prompt)
+        # 底层提示词：只显示 SELF.md
+        self_text = ""
+        try:
+            p = self._self_path(key)
+            if os.path.isfile(p):
+                with open(p, encoding="utf-8") as f:
+                    self_text = f.read().strip()
+        except Exception as e:
+            print("[self] load failed: %r" % (e,), flush=True)
+        box = getattr(self, f"{key}_self_prompt", None)
+        if box is not None:
+            box.delete("1.0", tk.END)
+            box.insert("1.0", self_text)
+        # System Prompt 不再在 UI 显示，但仍保留在内存中并原样写回 config.json
+        self._sys_prompts[key] = ai.system_prompt
         getattr(self, f"{key}_key").delete(0, tk.END)
         getattr(self, f"{key}_key").insert(0, ai.api_key)
         getattr(self, f"{key}_base").delete(0, tk.END)
@@ -1637,8 +1592,9 @@ class SettingsPanel(ttk.Frame):
         getattr(self, f"{key}_model").set(ai.model)
 
     def _collect_ai(self, key: str) -> PlatformAIConfig:
+        system_prompt = str(self._sys_prompts.get(key, "") or "")
         return PlatformAIConfig(
-            system_prompt=getattr(self, f"{key}_prompt").get("1.0", tk.END).strip(),
+            system_prompt=system_prompt,
             api_key=getattr(self, f"{key}_key").get().strip(),
             base_url=getattr(self, f"{key}_base").get().strip() or "https://api.deepseek.com",
             model=getattr(self, f"{key}_model").get().strip() or "deepseek-chat",
@@ -1781,6 +1737,7 @@ class SettingsPanel(ttk.Frame):
 
     def _save(self) -> None:
         cfg = self.collect()
+        self._sync_self_layers(cfg)
         if self.on_save:
             self.on_save(cfg)
         else:

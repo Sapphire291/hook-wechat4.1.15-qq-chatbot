@@ -73,6 +73,8 @@ _GUI_LOCK = threading.Lock()
 
 # 微信「动画表情」消息在数据库里是加密的，取不到图片，用标记让 AI 知道这是表情包
 STICKER_MARK = "[表情包]"
+GIF_SHEET_NOTE = ("同一段动画的4帧合成图（左上、右上、左下、右下），"
+                  "不是四张独立图片，请按一个连续动作理解")
 _STICKER_TYPES = ("动画表情", "表情", "emotion")
 
 
@@ -576,6 +578,29 @@ class WeChatAdapter(ChatAdapter):
         except Exception:
             return ""
 
+    @staticmethod
+    def _incoming_sticker_text(desc: str, tags=None, animated: bool = False) -> str:
+        """已有标签时，用一条文字消息代替图片送给主模型（不再走视觉）。"""
+        parts = ["对方发来表情包"]
+        if animated:
+            parts.append("动画（4帧合成：左上→右上→左下→右下）")
+        if desc:
+            parts.append("描述：" + str(desc).strip())
+        if tags:
+            parts.append("标签：" + "、".join([str(x) for x in tags]))
+        return "[" + "｜".join(parts) + "]"
+
+    def _describe_incoming_async(self, md5: str, path: str, animated: bool) -> None:
+        """后台给首次收到的表情打详细标签，不阻塞本轮回复。"""
+        def worker():
+            try:
+                from .chat_stickers import describe_incoming_sticker
+                r = describe_incoming_sticker(md5, path, animated=animated, config=self.config)
+                _send_log("incoming_sticker_desc md5=%s ok=%s %r" % (md5, r.get("ok"), r))
+            except Exception as exc:
+                _send_log("incoming_sticker_desc failed md5=%s %r" % (md5, exc))
+        threading.Thread(target=worker, name="describe-incoming-sticker", daemon=True).start()
+
     def _save_incoming_sticker(self, md5: str, session: str) -> None:
         """收到未记录的表情时自动保存到 chat_stickers，不改微信收藏。"""
         if not bool(getattr(self.config, "wechat_auto_save_stickers", True)):
@@ -653,23 +678,40 @@ class WeChatAdapter(ChatAdapter):
             raw_content = content
             if mtype in _STICKER_TYPES:
                 mt = MessageType.OTHER
-                content = STICKER_MARK
                 self.last_image_msg = m
-                # 动画表情：按 md5 从 emoticon.db 取 CDN 明图
-                sp = self._sticker_image(raw_content)
-                if sp:
-                    image_paths.append(sp)
+                md5m = re.search(r'md5\s*=\s*"([0-9a-fA-F]{32})"', raw_content or "")
+                mid = md5m.group(1).lower() if md5m else ""
+                cached = {}
+                if mid:
                     try:
-                        md5m = re.search(r'md5\s*=\s*"([0-9a-fA-F]{32})"', raw_content or "")
-                        if md5m:
-                            mid = md5m.group(1).lower()
-                            orig = self._sticker_original.get(mid, "")
-                            if orig.lower().endswith((".gif", ".webp")):
-                                content = ("[GIF表情包：下面是同一动画的4帧拼图"
-                                           "（左上、右上、左下、右下），不是普通四格图片]")
-                            self._save_incoming_sticker(mid, username)
+                        from .chat_stickers import find_chat_sticker
+                        cached = find_chat_sticker(mid) or {}
                     except Exception:
-                        pass
+                        cached = {}
+                desc = str(cached.get("desc") or "").strip()
+                tags = [str(x).strip() for x in (cached.get("tags") or []) if str(x).strip()]
+                animated = str(cached.get("kind") or "") == "animated"
+                if desc:
+                    # 已有详细标签：不再下载/不再附图，主模型只读文字标签
+                    content = self._incoming_sticker_text(desc, tags, animated)
+                else:
+                    # 首次/未标注：取图并交给多模态；后台识图打详细标签
+                    sp = self._sticker_image(raw_content)
+                    if sp:
+                        image_paths.append(sp)
+                        if mid:
+                            try:
+                                orig = self._sticker_original.get(mid, "")
+                                if orig.lower().endswith((".gif", ".webp")):
+                                    animated = True
+                                self._save_incoming_sticker(mid, username)
+                                self._describe_incoming_async(mid, sp, animated)
+                            except Exception:
+                                pass
+                    if animated:
+                        content = "[GIF表情包：" + GIF_SHEET_NOTE + "]"
+                    else:
+                        content = STICKER_MARK
             elif mtype in _IMAGE_TYPES:
                 mt = MessageType.IMAGE
                 content = "[图片]"

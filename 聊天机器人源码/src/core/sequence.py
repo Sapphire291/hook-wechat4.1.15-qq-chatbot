@@ -95,6 +95,16 @@ class MessageSequencer:
             self._pending.pop(key, None)
         return msg
 
+    def pop_all(self, key: Optional[str] = None) -> List[object]:
+        """取出并清空该会话的全部待处理消息（按序列顺序）。"""
+        if key is None:
+            out = []
+            for k in list(self._pending.keys()):
+                out.extend(self.pop_all(k))
+            return out
+        lst = self._pending.pop(key, [])
+        return [msg for _, _, msg in lst]
+
     def has_pending(self, key: str) -> bool:
         return bool(self._pending.get(key))
 

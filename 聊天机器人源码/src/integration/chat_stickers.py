@@ -214,6 +214,119 @@ def scan_chat_stickers(session_limit: int = 5, msg_limit: int = 120,
 
 
 # --------------------------------------------------------------------------- #
+# 收到别人表情：按 md5 查标签 / 首次识图打详细标签
+# --------------------------------------------------------------------------- #
+_CHAT_DESC_SYSTEM = (
+    "你是微信聊天表情包理解助手。用户会给你一张别人发来的微信表情包图片。"
+    "如果这张图是同一个动画的 4 帧合成图（左上、右上、左下、右下），"
+    "请把它理解为一个连续动作，描述动作过程，不要描述成四张独立图片或四格漫画。"
+    "只输出 JSON："
+    '{"desc": "详细描述：画面里的人/角色在做什么动作、表情、拿什么、场景/文字，'
+    '动画则说明从哪一帧到哪一帧怎么变化，60~100字", '
+    '"tags": ["5到8个中文短标签：动作、对象、情绪、场景、梗，不要重复"]}'
+)
+_CHAT_DESC_USER = "请描述这张别人发来的表情包，输出 JSON。"
+
+
+def _sticker_base(images_dir: str = "") -> str:
+    base = str(images_dir or "")
+    if base:
+        return base
+    try:
+        from .account_store import active_emoji_images_dir
+        return active_emoji_images_dir() or ""
+    except Exception:
+        return ""
+
+
+def _chat_catalog_path(base: str) -> str:
+    return os.path.join(base, "chat_stickers", "catalog.json")
+
+
+def find_chat_sticker(md5: str, images_dir: str = "") -> dict:
+    """按 md5 查本地 chat_stickers 记录；没有返回空 dict。"""
+    md5 = str(md5 or "").lower()
+    if not md5:
+        return {}
+    base = _sticker_base(images_dir)
+    if not base:
+        return {}
+    data = _load_catalog(_chat_catalog_path(base))
+    for it in data.get("items") or []:
+        if isinstance(it, dict) and str(it.get("id") or "").lower() == md5:
+            return it
+    return {}
+
+
+def describe_incoming_sticker(md5: str, path: str, animated: bool = False,
+                              images_dir: str = "", config=None,
+                              vision=None) -> dict:
+    """首次收到某表情时识图：动作细节 + 动画过程 + 5~8 标签，写回 catalog。
+
+    同一 md5 已有 desc 时直接跳过；失败保留旧记录，不删除文件。
+    """
+    md5 = str(md5 or "").lower()
+    if not md5 or not path or not os.path.isfile(str(path)):
+        return {"ok": False, "error": "missing md5/path"}
+    base = _sticker_base(images_dir)
+    if not base:
+        return {"ok": False, "error": "no account sticker dir"}
+    sub = os.path.join(base, "chat_stickers")
+    os.makedirs(sub, exist_ok=True)
+    catalog_path = _chat_catalog_path(base)
+    data = _load_catalog(catalog_path)
+    items = [x for x in (data.get("items") or []) if isinstance(x, dict)]
+    item = None
+    for it in items:
+        if str(it.get("id") or "").lower() == md5:
+            item = it
+            break
+    if item is not None and str(item.get("desc") or "").strip():
+        return {"ok": True, "skipped": True, "md5": md5, "desc": item.get("desc")}
+    if vision is None:
+        try:
+            from ..emoji.wechat_fav import WeChatFavStickers
+            fav = WeChatFavStickers(base, config)
+
+            def vision(p):  # noqa: F811
+                return fav._vision_ask(
+                    p, system_prompt=_CHAT_DESC_SYSTEM,
+                    user_prompt=_CHAT_DESC_USER, max_tokens=500, max_tags=8)
+        except Exception as exc:
+            return {"ok": False, "error": "vision init failed: %r" % (exc,)}
+    try:
+        r = vision(str(path)) or {}
+    except Exception as exc:
+        return {"ok": False, "error": "vision failed: %r" % (exc,)}
+    desc = str(r.get("desc") or "").strip()
+    if not desc:
+        return {"ok": False, "error": "empty desc"}
+    tags = [str(t).strip() for t in (r.get("tags") or []) if str(t).strip()][:8]
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    if item is None:
+        item = {"id": md5, "file": str(path),
+                "ext": os.path.splitext(str(path))[1].lower(),
+                "cdn_url": "", "source": "auto_receive", "session": ""}
+        items.append(item)
+    item.update({
+        "desc": desc,
+        "tags": tags,
+        "described": True,
+        "desc_source": "vision_incoming",
+        "kind": "animated" if animated else "static",
+        "frames": 4 if animated else 1,
+        "described_at": now,
+    })
+    if not item.get("file") or not os.path.isfile(str(item.get("file"))):
+        item["file"] = str(path)
+    data["items"] = items
+    data["total"] = len(items)
+    _save_catalog_atomic(catalog_path, data)
+    return {"ok": True, "md5": md5, "desc": desc, "tags": tags,
+            "animated": bool(animated)}
+
+
+# --------------------------------------------------------------------------- #
 # AI 重新识别/标注本地聊天表情（desc/tags 写回 catalog.json）
 # --------------------------------------------------------------------------- #
 def _save_catalog_atomic(path: str, data: dict) -> None:

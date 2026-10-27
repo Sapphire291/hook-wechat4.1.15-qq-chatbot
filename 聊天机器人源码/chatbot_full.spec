@@ -17,7 +17,7 @@ for pkg in ("wechatauto", "uiautomation", "winsdk", "cv2", "pyautogui", "pyscree
     except Exception:
         pass
 
-datas += [("assets", "assets"), ("napcat_bundle.zip", "."), ("hook", "hook")]
+datas += [("assets", "assets"), ("hook", "hook")]
 hiddenimports += [
     "src.integration.wechat_contacts",
     "src.integration.hook_injector",

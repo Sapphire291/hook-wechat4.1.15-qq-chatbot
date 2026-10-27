@@ -145,6 +145,10 @@ class ContactMemory:
             with open(p, "w", encoding="utf-8") as f:
                 f.write(SELF_SKELETON)
 
+    def self_layer(self) -> str:
+        """读取 memory/<platform>/SELF.md：每轮注入的自我层。"""
+        return self._read_text(os.path.join(self.root, "SELF.md"), 4000).strip()
+
     def _read_text(self, path, limit=20000):
         try:
             with open(path, "r", encoding="utf-8") as f:

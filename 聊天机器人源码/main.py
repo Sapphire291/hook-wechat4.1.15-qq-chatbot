@@ -15,7 +15,6 @@ from src.emoji.provider import EmojiProviderImpl
 from src.integration import create_adapters
 from src.logging.logger import setup_logging
 from src.memory import HistoryStore, MemoryStore
-from src.napcat_runtime import NapCatRuntime
 from src.policy import create_frequency_policy, create_whitelist_policy
 from src.security import create_detectors
 from src.core.paths import data_dir, memory_dir
@@ -24,7 +23,7 @@ from src.core.paths import data_dir, memory_dir
 def hide_console() -> None:
     """隐藏本进程的控制台窗口（--console 模式打包时用）。
 
-    NapCat 的控制台注入器需要父进程拥有真实控制台，但控制台窗口可以被隐藏，
+    需要真实控制台的组件（如注入器）必须有父进程控制台，但控制台窗口可以被隐藏，
     用户只看到 GUI。
     """
     try:
@@ -201,14 +200,6 @@ def make_sticker_actions(config, adapters):
     return fetch_faces, favorite_last
 
 
-def find_napcat_zip() -> str:
-    """返回打包进 exe 的 NapCat 压缩包路径（兼容 frozen 与源码运行）。"""
-    if getattr(sys, "frozen", False):
-        meipass = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-        return os.path.join(meipass, "napcat_bundle.zip")
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "napcat_bundle.zip")
-
-
 def find_mod_dir() -> str:
     """返回插件目录：数据根下 mod/（优先），否则 exe 同级 mod/、源码目录 mod/。"""
     from src.core.paths import data_home
@@ -227,7 +218,7 @@ def find_mod_dir() -> str:
     return d
 
 
-def load_plugins(config, config_store, bus, queue, adapters, memory_store, napcat=None):
+def load_plugins(config, config_store, bus, queue, adapters, memory_store):
     """加载 mod/ 下全部插件；任何失败都不影响主程序。"""
     try:
         from src.plugins import PluginContext, load_plugins as _load
@@ -235,7 +226,7 @@ def load_plugins(config, config_store, bus, queue, adapters, memory_store, napca
         context = PluginContext(
             config=config, config_store=config_store, bus=bus, queue=queue,
             adapters=adapters, memory_store=memory_store,
-            data_dir=data_dir(), mod_dir=mod_dir, napcat=napcat,
+            data_dir=data_dir(), mod_dir=mod_dir,
         )
         return _load(mod_dir, context)
     except Exception:
@@ -296,10 +287,6 @@ def _check_paths() -> int:
         add("mod", find_mod_dir())
     except Exception as exc:
         add("mod", "ERR %r" % (exc,))
-    try:
-        add("napcat_zip", find_napcat_zip())
-    except Exception as exc:
-        add("napcat_zip", "ERR %r" % (exc,))
     try:
         cfg = ConfigStore().load()
         add("emoji_cfg", str(getattr(cfg, "emoji_images_dir", "")))
@@ -391,12 +378,6 @@ def main() -> int:
     )
     fetch_faces, favorite_last = make_sticker_actions(config, runtime.adapters)
 
-    # 内置 NapCat：自动拉起（解压/注入/扫码/自动配 OneBot）
-    napcat = None
-    if config.qq_enabled:
-        napcat = NapCatRuntime(config, bundled_zip=find_napcat_zip())
-        threading.Thread(target=napcat.run_lifecycle, name="napcat-boot", daemon=True).start()
-
     # 微信适配器自动启动（避免打开程序后忘记点“启动微信”导致不回复）
     if config.wechat_enabled:
         def _autostart_wechat():
@@ -411,11 +392,9 @@ def main() -> int:
             chat_fetcher=make_chat_fetcher(config),
             sticker_fetcher=fetch_faces,
             sticker_favoriter=favorite_last,
-            napcat=napcat,
             memory_store=getattr(runtime, "memory_store", None),
             plugins=load_plugins(config, config_store, bus, _queue,
-                                 runtime.adapters, getattr(runtime, "memory_store", None),
-                                 napcat=napcat))
+                                 runtime.adapters, getattr(runtime, "memory_store", None)))
     return 0
 
 

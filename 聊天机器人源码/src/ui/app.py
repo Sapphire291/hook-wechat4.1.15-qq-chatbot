@@ -44,7 +44,7 @@ class ChatBotApp:
 
     def __init__(self, root: tk.Tk, config_store: ConfigStore, records: RecordsStore,
                  bus: EventBus, bot: BotController, initial_config: AppConfig, chat_fetcher=None,
-                 sticker_fetcher=None, sticker_favoriter=None, napcat=None, memory_store=None,
+                 sticker_fetcher=None, sticker_favoriter=None, memory_store=None,
                  plugins=None):
         self.root = root
         self.config_store = config_store
@@ -55,10 +55,8 @@ class ChatBotApp:
         self.chat_fetcher = chat_fetcher
         self.sticker_fetcher = sticker_fetcher
         self.sticker_favoriter = sticker_favoriter
-        self.napcat = napcat
         self.memory_store = memory_store
         self.plugins = plugins or []
-        self._napcat_connected = False
         self.alert_window = None
         self.input_guard = None
         self._wechat_autostart_pending = True
@@ -161,8 +159,7 @@ class ChatBotApp:
                                             chat_fetcher=self.chat_fetcher,
                                             sticker_fetcher=self.sticker_fetcher,
                                             sticker_favoriter=self.sticker_favoriter,
-                                            napcat=self.napcat,
-                                            memory_store=self.memory_store,
+                                                                            memory_store=self.memory_store,
                                             wechat_plugin=self._find_wechat_plugin(),
                                             bot_controller=self.bot)
         self.notebook.add(self.settings_panel, text="设置")
@@ -292,7 +289,6 @@ class ChatBotApp:
         """周期刷新状态（mainloop 定时调用）。"""
         self._refresh_status()
         self._poll_wechat_autostart()
-        self._poll_napcat()
         if getattr(self, "plugin_panel", None) is not None:
             try:
                 self.plugin_panel.poll()
@@ -327,29 +323,15 @@ class ChatBotApp:
             pass
         self._wechat_autostart_pending = False
 
-    def _poll_napcat(self) -> None:
-        if self.napcat is None:
-            return
-        # 刷新「设置 → QQ AI」页里的登录状态与二维码
-        self.settings_panel.update_napcat_status(self.napcat)
-        if self.napcat.phase == "connected" and not self._napcat_connected:
-            self._napcat_connected = True
-            # 登录成功后自动启动 QQ 机器人
-            try:
-                self.bot.start(Platform.QQ)
-            except Exception:
-                pass
-            self._refresh_status()
-
 
 def run_app(config_store: ConfigStore, records: RecordsStore, bus: EventBus,
             bot: BotController, config: AppConfig, chat_fetcher=None,
-            sticker_fetcher=None, sticker_favoriter=None, napcat=None,
+            sticker_fetcher=None, sticker_favoriter=None,
             memory_store=None, plugins=None) -> None:
     """启动 GUI 主循环。"""
     root = tk.Tk()
     app = ChatBotApp(root, config_store, records, bus, bot, config, chat_fetcher=chat_fetcher,
                      sticker_fetcher=sticker_fetcher, sticker_favoriter=sticker_favoriter,
-                     napcat=napcat, memory_store=memory_store, plugins=plugins)
+                     memory_store=memory_store, plugins=plugins)
     app.poll()  # 启动周期状态刷新
     root.mainloop()

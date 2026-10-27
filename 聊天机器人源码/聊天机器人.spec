@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('assets', 'assets'), ('napcat_bundle.zip', '.')]
+datas = [('assets', 'assets'), ]
 binaries = []
 hiddenimports = ['wechatauto']
 tmp_ret = collect_all('wechatauto')

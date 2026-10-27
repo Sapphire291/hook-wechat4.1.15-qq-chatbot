@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""QQ 接入适配器：基于 NapCat / OneBot v11 正向 WebSocket 协议。
+"""QQ 接入适配器：基于 OneBot v11 正向 WebSocket 协议（连接外部兼容实现）。
 
 依赖：websocket-client（懒导入；未安装时 available() 返回 False）。
 连接地址来自 AppConfig.qq_onebot_ws_url，默认 ws://127.0.0.1:3001。
@@ -320,7 +320,7 @@ class QQAdapter(ChatAdapter):
         return text, mentions_me, mtype, image_paths
 
     def _save_image(self, seg_data: dict) -> str:
-        """直接从图片缓存路径读取（NapCat 已缓存到本地），不下载、不删除。"""
+        """直接从图片缓存路径读取（OneBot 实现已缓存到本地），不下载、不删除。"""
         try:
             for key in ("path", "file"):
                 p = seg_data.get(key)

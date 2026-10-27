@@ -299,7 +299,9 @@ class WeChatFavStickers:
             return None
         return key, base, model
 
-    def _vision_ask(self, image_path: str, timeout: int = 90) -> Optional[dict]:
+    def _vision_ask(self, image_path: str, timeout: int = 90,
+                    system_prompt: str = "", user_prompt: str = "",
+                    max_tokens: int = 300, max_tags: int = 5) -> Optional[dict]:
         client = self._ai_client()
         if not client:
             return None
@@ -314,16 +316,16 @@ class WeChatFavStickers:
         body = {
             "model": model,
             "messages": [
-                {"role": "system", "content": _DESC_SYSTEM},
+                {"role": "system", "content": system_prompt or _DESC_SYSTEM},
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "请描述这张表情包，输出 JSON。"},
+                        {"type": "text", "text": user_prompt or "请描述这张表情包，输出 JSON。"},
                         {"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (mime, b64)}},
                     ],
                 },
             ],
-            "max_tokens": 300,
+            "max_tokens": int(max_tokens),
             "stream": False,
         }
         req = urllib.request.Request(
@@ -348,7 +350,7 @@ class WeChatFavStickers:
         except Exception:
             return None
         desc = str(j.get("desc") or "").strip()
-        tags = [str(t) for t in (j.get("tags") or [])][:5]
+        tags = [str(t) for t in (j.get("tags") or [])][:max(1, int(max_tags or 5))]
         if not desc:
             return None
         return {"desc": desc, "tags": tags}
