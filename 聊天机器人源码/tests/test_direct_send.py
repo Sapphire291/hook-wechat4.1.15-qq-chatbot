@@ -33,7 +33,7 @@ def main() -> int:
     }
 
     try:
-        ds.current_chat = lambda: "测试联系人"
+        ds.current_chat = lambda: "POS95518"
         ds.resolve_wxid = lambda name: "wxid_target"
         ds._wait_repl = lambda timeout=6.0: {"runs": 1, "repl": 0}
 

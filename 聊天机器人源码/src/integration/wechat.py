@@ -4,13 +4,12 @@
 原则：**绝不控制鼠标/键盘/窗口焦点**。
 
 - 读消息：使用 wechatauto 解密本地 SQLCipher 数据库（纯本地读盘，不碰屏幕）；
-- 发消息：只走「hook 协议」通道（WeChat-Hook 的 version.dll HTTP API，默认 30001）。
+- 发消息：只走本机注入 hook 的 HTTP API（默认 30001）。
   若未安装 hook，则发送直接返回 False，**不会退回 UIA/OCR 去点屏幕**。
 
 为什么发送需要 hook：
   微信 4.1.x 的发送必须经过客户端网络协议，纯本地数据库写入不会真正发出。
   非 GUI 的唯一可靠方式是给微信进程注入 hook 后由 HTTP 接口驱动。
-  注意：aixed/WeChat-Hook 目标版本为 4.1.10.27，微信 4.1.15 需要降级后使用；
   未安装 hook 时本适配器只做「读消息」，不接管键鼠。
 """
 from __future__ import annotations
@@ -29,7 +28,7 @@ from typing import Dict, List, Optional, Tuple
 from ..core.interfaces import ChatAdapter
 from ..core.models import AppConfig, Message, MessageType, Platform
 from ..core.paths import data_dir
-from ..core.paths import data_dir
+from .send_probe import probe
 
 HOOK_API = "http://127.0.0.1:30001"
 
@@ -51,9 +50,12 @@ def _account_scan_log(message: str) -> None:
 
 # 方案B1 直发（exp67 mode11）：当前会话作为供体，不切换目标。
 try:
-    from .direct_send import (direct_available, direct_send_image, direct_send_text,
+    from .direct_send import (current_chat as direct_current_chat,
+                              direct_available, direct_send_image, direct_send_text,
                               last_detail as direct_last_detail)
 except Exception:  # pragma: no cover
+    def direct_current_chat(*a, **k):
+        return ""
     def direct_available(*a, **k):
         return False
 
@@ -76,7 +78,11 @@ STICKER_MARK = "[表情包]"
 GIF_SHEET_NOTE = ("同一段动画的4帧合成图（左上、右上、左下、右下），"
                   "不是四张独立图片，请按一个连续动作理解")
 _STICKER_TYPES = ("动画表情", "表情", "emotion")
-
+_FILE_TYPES = ("文件", "文件消息", "file", "File")
+_FILE_EXTS = (".docx", ".doc", ".pdf", ".txt", ".md", ".xlsx", ".xls", ".pptx", ".ppt",
+              ".csv", ".rtf")
+_TEXT_DEDUP_LOCK = threading.Lock()
+_TEXT_DEDUP = {}   # (chat_id, text_hash) -> last_sent_ts，防止 500 重试/并发导致重复气泡
 
 def _get_gui():
     """懒创建并复用 WeChatGUI（第一次会做窗口探测与布局校准）。"""
@@ -118,7 +124,7 @@ _IMAGE_TYPES = ("图片", "视频", "动画表情")
 # hook HTTP 通道（非 GUI）
 # ---------------------------------------------------------------------- #
 def hook_available(timeout: float = 1.5) -> bool:
-    """探测 WeChat-Hook 的 HTTP 服务是否就绪。"""
+    """探测本机 hook 的 HTTP 服务是否就绪。"""
     try:
         req = urllib.request.Request(HOOK_API + "/QueryDB/status", method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -261,6 +267,7 @@ class WeChatAdapter(ChatAdapter):
                 current = json.loads(resp.read().decode("utf-8")).get("chat", "")
         except Exception:
             current = ""
+        probe("ensure_donor_check", donor=donor, current=current)
         if current and (current == donor or current in ("文件传输助手", "filehelper")):
             return True
         # 用一条空格消息把微信切到供体（只切供体，不碰目标）
@@ -272,6 +279,8 @@ class WeChatAdapter(ChatAdapter):
             with urllib.request.urlopen(req, timeout=15) as resp:
                 out = json.loads(resp.read().decode("utf-8"))
             _send_log("ensure_donor switch donor=%r current=%r out=%r" % (donor, current, out.get("chat")))
+            probe("ensure_donor_switched", donor=donor, before=current,
+                  out_chat=out.get("chat"), ret=out.get("ret"))
             return out.get("ret") == 0
         except Exception as exc:
             _send_log("ensure_donor failed %r" % (exc,))
@@ -675,6 +684,9 @@ class WeChatAdapter(ChatAdapter):
 
             mt = MessageType.TEXT
             image_paths: List[str] = []
+            file_paths: List[str] = []
+            file_lid = 0
+            file_name = ""
             raw_content = content
             if mtype in _STICKER_TYPES:
                 mt = MessageType.OTHER
@@ -716,6 +728,20 @@ class WeChatAdapter(ChatAdapter):
                 mt = MessageType.IMAGE
                 content = "[图片]"
                 self.last_image_msg = m
+            elif (mtype in _FILE_TYPES
+                  or ("<appmsg" in (raw_content or "")
+                      and (("<type>6</type>" in (raw_content or ""))
+                           or any(ext in (raw_content or "").lower() for ext in _FILE_EXTS)))):
+                mt = MessageType.OTHER
+                mm = re.search(r"<title>(.*?)</title>", raw_content or "", re.S)
+                file_name = re.sub(r"<[^>]+>", "", mm.group(1)).strip() if mm else ""
+                if not file_name:
+                    mm = re.search(r"<des>(.*?)</des>", raw_content or "", re.S)
+                    file_name = re.sub(r"<[^>]+>", "", mm.group(1)).strip() if mm else ""
+                file_lid = int(m.get("local_id") or 0)
+                content = "[文件] " + (file_name or "未命名文档")
+                _send_log("file message detected mtype=%r lid=%s name=%r raw=%r" % (
+                    mtype, file_lid, file_name, (raw_content or "")[:500]))
             elif mtype not in ("文本",):
                 mt = MessageType.OTHER
 
@@ -742,7 +768,7 @@ class WeChatAdapter(ChatAdapter):
             except Exception:
                 pass
 
-            return Message(
+            message = Message(
                 platform=Platform.WECHAT,
                 chat_id=str(username),   # 白名单/发送统一使用 wxid / @chatroom
                 chat_name=str(name),
@@ -754,26 +780,165 @@ class WeChatAdapter(ChatAdapter):
                 timestamp=time.time(),
                 message_type=mt,
                 image_paths=image_paths,
+                file_paths=file_paths,
             )
+            if file_lid or file_name:
+                try:
+                    setattr(message, "_file_local_id", file_lid)
+                    setattr(message, "_file_name", file_name)
+                except Exception:
+                    pass
+            return message
         except Exception:
             return None
+
+    def download_document(self, chat_id: str, local_id: int, file_name: str = "") -> str:
+        """后台下载微信文件消息，返回本地路径；失败返回空串。"""
+        try:
+            db = self._load_db()
+            if db is None:
+                _send_log("download_document no db chat=%s lid=%s name=%r" % (chat_id, local_id, file_name))
+                return ""
+            from wechatauto import MediaDownloader
+            from ..core.document_store import documents_dir
+            out_dir = documents_dir("wechat", str(chat_id))
+            os.makedirs(out_dir, exist_ok=True)
+            path = ""
+            if local_id:
+                media = MediaDownloader(db, save_dir=out_dir)
+                try:
+                    path = media.download_media(str(chat_id), int(local_id)) or ""
+                except Exception as exc:
+                    _send_log("download_document media failed lid=%s %r" % (local_id, exc))
+                if not path:
+                    try:
+                        path = media.download_file(str(chat_id), int(local_id), out_dir) or ""
+                    except Exception as exc:
+                        _send_log("download_document file failed lid=%s %r" % (local_id, exc))
+            # 兜底：微信已落盘的 msg/file 目录里按原文件名找
+            if not path and file_name:
+                try:
+                    base = os.path.join(str(getattr(db, "account_dir", "") or ""), "msg", "file")
+                    target = os.path.basename(file_name).strip().lower()
+                    stem = os.path.splitext(target)[0]
+                    exact = []
+                    fuzzy = []
+                    for root, _dirs, files in os.walk(base):
+                        for fn in files:
+                            low = fn.lower()
+                            if low == target:
+                                exact.append(os.path.join(root, fn))
+                            elif stem and len(stem) >= 3 and (stem in low or low.startswith(stem[:12])):
+                                fuzzy.append(os.path.join(root, fn))
+                    src = ""
+                    if exact:
+                        src = exact[0]
+                    elif fuzzy:
+                        src = max(fuzzy, key=lambda p: os.path.getmtime(p))
+                    if src:
+                        dst = os.path.join(out_dir, "%s_%s" % (
+                            int(local_id or 0), os.path.basename(src)))
+                        shutil.copy2(src, dst)
+                        path = dst
+                        _send_log("download_document fuzzy name=%r -> %s" % (file_name, src))
+                except Exception as exc:
+                    _send_log("download_document search failed name=%r %r" % (file_name, exc))
+            # 文件名/资源缺失时：尝试取 msg/file 下最近 10 分钟内最新的文件
+            if not path and not file_name:
+                try:
+                    base = os.path.join(str(getattr(db, "account_dir", "") or ""), "msg", "file")
+                    newest = None
+                    newest_t = time.time() - 600
+                    for root, _dirs, files in os.walk(base):
+                        for fn in files:
+                            fp = os.path.join(root, fn)
+                            try:
+                                mt = os.path.getmtime(fp)
+                            except Exception:
+                                continue
+                            if mt >= newest_t and (newest is None or mt > newest[0]):
+                                newest = (mt, fp)
+                    if newest:
+                        dst = os.path.join(out_dir, "%s_%s" % (
+                            int(local_id or 0), os.path.basename(newest[1])))
+                        shutil.copy2(newest[1], dst)
+                        path = dst
+                        _send_log("download_document fallback newest file=%s" % dst)
+                except Exception as exc:
+                    _send_log("download_document newest fallback failed %r" % (exc,))
+            # 分渠道下载：只扫描微信本地落盘，不再点击 UI
+            if path and os.path.isfile(path):
+                _send_log("download_document ok name=%r lid=%s -> %s" % (file_name, local_id, path))
+                return path
+            _send_log("download_document not_found name=%r lid=%s" % (file_name, local_id))
+        except Exception as exc:
+            _send_log("download_document failed chat=%s lid=%s %r" % (chat_id, local_id, exc))
+        return ""
 
     # ------------------------------------------------------------------ #
     # 发送：只走 hook，绝不退回 UIA/OCR
     # ------------------------------------------------------------------ #
+    def _probe_current_chat(self) -> str:
+        try:
+            return str(direct_current_chat() or "")
+        except Exception:
+            return ""
+
     def send_text(self, chat_id: str, text: str) -> bool:
         if not text:
             return False
+        # 去重：同一会话 5 秒内重复的完全相同文本只发一次（防 hook 500 重试/并发重复）
+        dkey = (str(chat_id), hashlib.sha1(str(text).encode("utf-8")).hexdigest())
+        now = time.time()
+        with _TEXT_DEDUP_LOCK:
+            last = float(_TEXT_DEDUP.get(dkey) or 0.0)
+            if now - last < 5.0:
+                _send_log("text duplicate suppressed target=%s age=%.1fs" % (chat_id, now - last))
+                return True
+        probe("send_text_begin", target=chat_id, text=text,
+              current=self._probe_current_chat())
         # 1) 优先 hook 协议（完全非 GUI）
         if self.hook_ready() and self._send_via_hook(chat_id, text):
+            with _TEXT_DEDUP_LOCK:
+                _TEXT_DEDUP[dkey] = time.time()
+            probe("send_text_done", target=chat_id, text=text,
+                  current=self._probe_current_chat(), ok=True)
+            return True
+        detail = ""
+        try:
+            detail = str(direct_last_detail("text") or "")
+        except Exception:
+            detail = ""
+        if "ambiguous" in detail or "500" in detail:
+            # 结果不确定：可能已经发送成功；绝不重试/屏幕兜底，避免重复气泡
+            _send_log("text ambiguous skip retry target=%s detail=%s" % (chat_id, detail[:160]))
+            return False
+        # 1b) 冗余一次：hook 首次明确失败时重试
+        _send_log("text hook failed, retry once target=%s" % chat_id)
+        try:
+            self._ensure_donor()
+        except Exception:
+            pass
+        time.sleep(0.8)
+        if self.hook_ready() and self._send_via_hook(chat_id, text):
+            with _TEXT_DEDUP_LOCK:
+                _TEXT_DEDUP[dkey] = time.time()
+            _send_log("text retry ok target=%s" % chat_id)
             return True
         # 2) 屏幕自动化（复用持久 WeChatGUI，命中快速路径）
         if getattr(self.config, "wechat_screen_send", True):
-            return _screen_send_text(str(chat_id), str(text))
+            ok = _screen_send_text(str(chat_id), str(text))
+            if ok:
+                with _TEXT_DEDUP_LOCK:
+                    _TEXT_DEDUP[dkey] = time.time()
+            return ok
+        _send_log("text send failed after retry target=%s" % chat_id)
         return False
 
     def _send_via_hook(self, chat_id: str, text: str) -> bool:
         # 文字也走直发，不解禁已隔离的微信窗口，避免回复瞬间抢输入
+        probe("hook_send_begin", target=chat_id, text=text,
+              current=self._probe_current_chat())
         db = self._load_db()
         wxid = ""
         if db is not None:
@@ -790,19 +955,27 @@ class WeChatAdapter(ChatAdapter):
             self._ensure_donor()
         except Exception:
             pass
+        probe("hook_after_ensure_donor", target=wxid,
+              current=self._probe_current_chat())
         try:
             from .wechat_isolator import begin_send
             begin_send(12)
         except Exception:
             pass
+        probe("hook_after_begin_send", target=wxid,
+              current=self._probe_current_chat())
         try:
             if direct_available():
                 ok = direct_send_text(wxid, text)
-                _send_log("text direct ok=%s target=%s detail=%s" % (
-                    ok, wxid, direct_last_detail("text")))
+                detail = direct_last_detail("text")
+                _send_log("text direct ok=%s target=%s detail=%s" % (ok, wxid, detail))
+                probe("hook_direct_result", target=wxid, ok=ok, detail=detail,
+                      current=self._probe_current_chat())
                 return ok
         except Exception as exc:
             _send_log("text direct exception %r" % (exc,))
+            probe("hook_direct_exception", target=wxid, error=repr(exc),
+                  current=self._probe_current_chat())
         finally:
             try:
                 from .wechat_isolator import clear_wechat_focus, end_send
@@ -811,6 +984,8 @@ class WeChatAdapter(ChatAdapter):
             except Exception:
                 pass
         _send_log("text direct unavailable target=%s" % wxid)
+        probe("hook_direct_unavailable", target=wxid,
+              current=self._probe_current_chat())
         return False
 
     def send_image(self, chat_id: str, image_path: str,
@@ -920,14 +1095,12 @@ class WeChatAdapter(ChatAdapter):
             return ""
 
     def send_sticker(self, chat_id: str, image_path: str) -> bool:
-        """发送原生贴纸：优先 B2（无种子/无面板/无点击），失败回退种子直发。
+        """发送原生贴纸（供体发送）：只走 B2 /EmojiSendDataTo。
 
-        两条路径都不写剪贴板、不注入键鼠、**不切换当前会话**：
-          - B2 /EmojiSendDataTo ：复用进程内 EmojiData 模板 + 自建 EmojiItem，
-                                  按 md5 patch 后走供体直发（首选，无需种子）；
-          - 种子 /EmojiSendMd5To ：复用已 pin 住的“种子”item（微信重启后需一次点击）。
-        模板存在条件：进程内有聊天历史贴纸渲染 / 收到过贴纸 / 点击过收藏表情；
-        三者都没有时 B2 返回 -3（no-template），此时若已有种子则回退种子发送。
+        策略（按用户要求）：
+          - B2 第一次失败 -> 等 0.8 秒，立刻再试一次 B2；
+          - 两次都失败 -> 终止这张表情包的发送（不再回退种子/面板/图片）；
+          - 不再设 40s 自定义超时（沿用 _hook_post 默认）。
         """
         try:
             if not image_path:
@@ -952,27 +1125,27 @@ class WeChatAdapter(ChatAdapter):
                 _send_log("sticker native: cannot resolve target chat=%r" % (chat_id,))
                 return False
 
-            # 路径 1：B2（首选，无需种子/面板）
-            b2 = _hook_post("/EmojiSendDataTo", {"md5": base, "to": target}, timeout=40.0)
-            b2_ret = int((b2 or {}).get("ret") or 0) if b2 else -999
-            if b2 and b2_ret == 0:
-                _send_log("sticker native B2 md5=%s target=%r ok=True resp=%r"
-                          % (base, target, b2))
-                return True
-            _send_log("sticker native B2 md5=%s target=%r ret=%s resp=%r -> fallback seed"
-                      % (base, target, b2_ret, b2))
-
-            # 路径 2：种子直发（B2 无模板 / 失败时回退）
-            pin = _hook_post("/EmojiPinned", timeout=5.0)
-            if not pin or int(pin.get("patchAddr") or 0) <= 0:
-                _send_log("sticker native: no template and no seed item "
-                          "(需要进程内有贴纸历史/收到贴纸，或人工发一张收藏贴纸)")
-                return False
-            res = _hook_post("/EmojiSendMd5To", {"md5": base, "to": target}, timeout=40.0)
-            ok = bool(res and res.get("ret") == 0)
-            _send_log("sticker native seed md5=%s target=%r ok=%s resp=%r"
-                      % (base, target, ok, res))
-            return ok
+            # 只走 B2（供体直发）；失败 0.8s 后再试一次，两次失败即终止
+            b2 = None
+            b2_ret = -999
+            for attempt in (1, 2):
+                try:
+                    b2 = _hook_post("/EmojiSendDataTo", {"md5": base, "to": target})
+                except Exception as e:
+                    b2 = None
+                    _send_log("sticker native B2 attempt %d exception: %r" % (attempt, e))
+                b2_ret = int((b2 or {}).get("ret") or 0) if b2 else -999
+                if b2 and b2_ret == 0:
+                    _send_log("sticker native B2 md5=%s target=%r ok=True attempt=%d resp=%r"
+                              % (base, target, attempt, b2))
+                    return True
+                _send_log("sticker native B2 md5=%s target=%r attempt=%d ret=%s resp=%r"
+                          % (base, target, attempt, b2_ret, b2))
+                if attempt == 1:
+                    time.sleep(0.8)
+            _send_log("sticker native B2 failed twice, abort sticker md5=%s target=%r"
+                      % (base, target))
+            return False
         except Exception as exc:
             _send_log("sticker native failed %r" % (exc,))
             return False

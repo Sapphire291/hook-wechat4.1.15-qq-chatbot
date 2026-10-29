@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <windows.h>
 #include <cstdio>
 #include <cstdarg>
@@ -11,13 +11,8 @@ inline void HookLog(const char* fmt, ...)
     va_end(ap);
 
     SYSTEMTIME st; GetLocalTime(&st);
-    // 日志写到系统临时目录，避免绑定固定盘符（原实现写死固定盘符路径）
-    wchar_t logDir[MAX_PATH] = {0};
-    wchar_t logPath[MAX_PATH] = {0};
-    if (GetTempPathW(MAX_PATH, logDir) > 0)
-        _snwprintf_s(logPath, MAX_PATH, _TRUNCATE, L"%sChatBot_hook_log.txt", logDir);
     FILE* f = nullptr;
-    if (_wfopen_s(&f, logPath[0] ? logPath : L"hook_log.txt", L"a, ccs=UTF-8") == 0 && f)
+    if (_wfopen_s(&f, L"E:\\CHAT\\hook_log.txt", L"a, ccs=UTF-8") == 0 && f)
     {
         fwprintf(f, L"[%02d:%02d:%02d.%03d] %hs\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
         fclose(f);

@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.error
 import urllib.request
+
+from .send_probe import probe
 
 HOOK_API = "http://127.0.0.1:30001"
 
@@ -22,8 +25,29 @@ def _post(path, payload, timeout=40):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+        if path in ("/ArmRecv", "/SendTextTo", "/GetChat"):
+            try:
+                data = json.loads(raw)
+                probe("hook_" + path.strip("/"), ret=data.get("ret"),
+                      chat=data.get("chat"), ms=int((time.time() - t0) * 1000),
+                      payload_len=len(str(payload)))
+            except Exception:
+                pass
+        return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        if path in ("/ArmRecv", "/SendTextTo", "/GetChat"):
+            probe("hook_error_" + path.strip("/"), code=getattr(exc, "code", 0),
+                  body=body, ms=int((time.time() - t0) * 1000))
+        raise
 
 
 def _sql(db, query):
@@ -121,41 +145,43 @@ def _donor_pair(target_wxid):
 def direct_send_text(target_wxid: str, text: str, timeout: float = 30.0) -> bool:
     """直发文字。
 
-    重要：/SendTextTo 返回 ret=0 = 已成功入队/发送，**绝不再重发**（旧实现等不到
-    RecvStats.repl 就重试，曾导致对方连收两条一模一样的消息）。
-    只有 ret!=0（接口明确失败）或抛异常才重试一次；repl 仅用于日志观测。
+    /SendTextTo 返回 ret=0 = 已成功，绝不重发。
+    HTTP 500/异常属于“结果不确定”：可能已经写入，再重试会造成重复消息，
+    因此不再重试；只有接口明确 ret!=0 才记录为失败。
     """
     if not target_wxid or not text:
         return False
     chat, donor = _donor_pair(target_wxid)
+    probe("text_start", target=target_wxid, current=chat, donor=donor, text=text)
     if not chat or not donor:
         LAST_DETAIL["text"] = "no chat/donor"
+        probe("text_no_donor", target=target_wxid, current=chat, donor=donor)
         return False
-    errors = []
-    for attempt in range(2):
+    try:
+        arm = _post("/ArmRecv", {"mode": 11, "from": donor, "to": target_wxid}, 10)
+        if arm.get("ret") != 0:
+            LAST_DETAIL["text"] = "arm_ret=%r" % (arm.get("ret"),)
+            return False
+        r = _post("/SendTextTo", {"chat": chat, "text": text}, timeout)
         try:
-            arm = _post("/ArmRecv", {"mode": 11, "from": donor, "to": target_wxid}, 10)
-            if arm.get("ret") != 0:
-                errors.append("arm_ret=%r" % (arm.get("ret"),))
-                time.sleep(1.0)
-                continue
-            r = _post("/SendTextTo", {"chat": chat, "text": text}, timeout)
-            try:
-                ret = int(r.get("ret") or 0)
-            except Exception:
-                ret = -1
-            if ret == 0:
-                # 已发送：等一会儿回执仅用于观测，不再重发
-                st = _wait_repl(6.0)
-                LAST_DETAIL["text"] = "ret=0 runs=%r repl=%r" % (
-                    st.get("runs"), st.get("repl"))
-                return True
-            errors.append("send_ret=%r" % ret)
-        except Exception as exc:
-            errors.append("exc=%r" % (exc,))
-        time.sleep(1.0)
-    LAST_DETAIL["text"] = "failed: " + "; ".join(errors[-3:])
-    return False
+            ret = int(r.get("ret") or 0)
+        except Exception:
+            ret = -1
+        if ret == 0:
+            LAST_DETAIL["text"] = "ret=0 (no wait)"
+            probe("text_ok", target=target_wxid, current=chat, donor=donor,
+                  text=text, ret=ret)
+            return True
+        LAST_DETAIL["text"] = "send_ret=%r" % (ret,)
+        probe("text_failed_ret", target=target_wxid, current=chat, donor=donor,
+              text=text, ret=ret)
+        return False
+    except Exception as exc:
+        # 关键：500/超时可能已经发送成功；不重试，避免重复气泡。
+        LAST_DETAIL["text"] = "ambiguous: exc=%r (no retry)" % (exc,)
+        probe("text_ambiguous", target=target_wxid, current=chat, donor=donor,
+              text=text, error=repr(exc))
+        return False
 
 
 def direct_send_image(target_wxid: str, path: str, timeout: float = 90.0,
@@ -181,9 +207,7 @@ def direct_send_image(target_wxid: str, path: str, timeout: float = 90.0,
             except Exception:
                 ret = -1
             if ret == 0:
-                st = _wait_repl(6.0)
-                LAST_DETAIL["image"] = "ret=0 route=%s runs=%r repl=%r" % (
-                    route, st.get("runs"), st.get("repl"))
+                LAST_DETAIL["image"] = "ret=0 route=%s (no wait)" % route
                 return True
             errors.append("send_ret=%r" % ret)
         except Exception as exc:

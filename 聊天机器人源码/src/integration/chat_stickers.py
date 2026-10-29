@@ -221,11 +221,11 @@ _CHAT_DESC_SYSTEM = (
     "如果这张图是同一个动画的 4 帧合成图（左上、右上、左下、右下），"
     "请把它理解为一个连续动作，描述动作过程，不要描述成四张独立图片或四格漫画。"
     "只输出 JSON："
-    '{"desc": "详细描述：画面里的人/角色在做什么动作、表情、拿什么、场景/文字，'
-    '动画则说明从哪一帧到哪一帧怎么变化，60~100字", '
+    '{"desc": "30~50个中文字符，客观写清动作、表情/情绪；'
+    '如果图中有文字，必须把文字原样写进描述", '
     '"tags": ["5到8个中文短标签：动作、对象、情绪、场景、梗，不要重复"]}'
 )
-_CHAT_DESC_USER = "请描述这张别人发来的表情包，输出 JSON。"
+_CHAT_DESC_USER = "请描述这张别人发来的表情包，输出 JSON；30~50字，写清动作/表情，图中有文字请原样写进描述。"
 
 
 def _sticker_base(images_dir: str = "") -> str:
@@ -337,6 +337,22 @@ def _save_catalog_atomic(path: str, data: dict) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
         os.replace(tmp, path)
+        # 标签/描述文本：自动化程序据此筛选候选，不经过 AI
+        try:
+            lines = []
+            for it in (data.get("items") or []):
+                if not isinstance(it, dict) or not it.get("file"):
+                    continue
+                lines.append("%s\t%s\t%s\t%s" % (
+                    str(it.get("id") or ""), str(it.get("file") or ""),
+                    str(it.get("desc") or "").replace("\t", " ").replace("\n", " "),
+                    ",".join(str(t) for t in (it.get("tags") or []))))
+            tag_path = os.path.join(os.path.dirname(path), "sticker_tags.txt")
+            with open(tag_path + ".tmp", "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + ("\n" if lines else ""))
+            os.replace(tag_path + ".tmp", tag_path)
+        except Exception:
+            pass
     except Exception:
         pass
 

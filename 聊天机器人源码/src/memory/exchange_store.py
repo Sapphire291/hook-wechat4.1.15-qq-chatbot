@@ -95,3 +95,43 @@ class ExchangeStore:
         except Exception:
             pass
         return n
+
+    def prune_chars(self, chat: str, max_chars: int = 90000,
+                    remove_chars: int = 50000) -> int:
+        """当某会话原始记录文本超过 max_chars，删除最早的约 remove_chars 字。"""
+        chat = str(chat or "")
+        if not chat:
+            return 0
+        try:
+            with self._lock:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    lines = [ln.strip() for ln in f if ln.strip()]
+                recs = []
+                total = 0
+                for ln in lines:
+                    try:
+                        obj = json.loads(ln)
+                    except Exception:
+                        continue
+                    recs.append((obj, ln))
+                    if str(obj.get("chat") or "") == chat:
+                        total += len(str(obj.get("text") or ""))
+                if total <= max_chars:
+                    return 0
+                removed = 0
+                removed_n = 0
+                keep = []
+                for obj, ln in recs:
+                    if removed < remove_chars and str(obj.get("chat") or "") == chat:
+                        removed += len(str(obj.get("text") or ""))
+                        removed_n += 1
+                        continue
+                    keep.append(ln)
+                tmp = self.path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    for ln in keep:
+                        f.write(ln + "\n")
+                os.replace(tmp, self.path)
+                return removed_n
+        except Exception:
+            return 0

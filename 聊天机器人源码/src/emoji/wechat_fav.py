@@ -39,7 +39,7 @@ _IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 _DESC_SYSTEM = (
     "你是表情包理解助手。用户会给你一张微信聊天表情包图片，请只输出 JSON："
-    '{"desc": "一句话（不超过20字）说明它表达的情绪/动作/含义", '
+    '{"desc": "30~50个中文字符，客观写清动作和表情/情绪；如果图中有文字，把文字原样写进去", '
     '"tags": ["2-4个中文情绪或场景标签"]}'
 )
 
@@ -77,6 +77,7 @@ class WeChatFavStickers:
         self.images_dir = images_dir
         self.fav_dir = os.path.join(images_dir, _FAV_SUBDIR)
         self.catalog_path = os.path.join(self.fav_dir, "catalog.json")
+        self.tag_index_path = os.path.join(self.fav_dir, "sticker_tags.txt")
         self.config = config
         self.platform = platform
         self._lock = threading.Lock()
@@ -115,6 +116,46 @@ class WeChatFavStickers:
             json.dump(data, f, ensure_ascii=False, indent=1)
         os.replace(tmp, self.catalog_path)
         self._items = items
+        self._write_tag_index(items)
+
+    def _write_tag_index(self, items: List[dict] = None) -> None:
+        """标签/描述文本：供自动化程序做候选筛选（不经过 AI）。"""
+        try:
+            items = items if items is not None else self.load()
+            self._ensure_dir()
+            lines = []
+            for it in items:
+                if not it.get("file"):
+                    continue
+                lines.append("%s\t%s\t%s\t%s" % (
+                    str(it.get("id") or ""),
+                    str(it.get("file") or ""),
+                    str(it.get("desc") or "").replace("\t", " ").replace("\n", " "),
+                    ",".join(str(t) for t in (it.get("tags") or []))))
+            tmp = self.tag_index_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + ("\n" if lines else ""))
+            os.replace(tmp, self.tag_index_path)
+        except Exception:
+            pass
+
+    def _tag_items(self) -> List[dict]:
+        """读标签文本文件；没有文本时回退 catalog。"""
+        items = []
+        try:
+            with open(self.tag_index_path, encoding="utf-8") as f:
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 4:
+                        continue
+                    mid, file, desc, tags = parts[0], parts[1], parts[2], parts[3]
+                    if not file or not os.path.isfile(file):
+                        continue
+                    items.append({"id": mid, "file": file, "desc": desc,
+                                  "tags": [t.strip() for t in tags.split(",") if t.strip()]})
+        except Exception:
+            items = []
+        return items or self.load()
 
     # ---------------- 拉取 ----------------
     def _hook_post(self, path: str, payload: dict, timeout: float = 120.0):
@@ -302,6 +343,35 @@ class WeChatFavStickers:
     def _vision_ask(self, image_path: str, timeout: int = 90,
                     system_prompt: str = "", user_prompt: str = "",
                     max_tokens: int = 300, max_tags: int = 5) -> Optional[dict]:
+        # 优先交给 exe 内置智能体团队：动作/表情 + 标签/文字，30~50字
+        try:
+            from ..harness.ai_bridge import sticker_describe
+            team = sticker_describe(image_path, platform=self.platform)
+            if team and team.get("desc"):
+                return {"desc": str(team["desc"])[:50],
+                        "tags": [str(t) for t in (team.get("tags") or [])][:max(1, int(max_tags or 5))]}
+        except Exception:
+            pass
+        # 统一走 exe 内置原生核；无 native core 时再回退直连
+        try:
+            from ..harness.ai_bridge import vision as _bridge_vision
+            bridged = _bridge_vision(
+                system_prompt or _DESC_SYSTEM,
+                user_prompt or "请描述这张表情包，输出 JSON。",
+                image_path, platform=self.platform, max_tokens=max_tokens)
+        except Exception:
+            bridged = None
+        if bridged:
+            m = re.search(r"\{.*\}", str(bridged), re.S)
+            if m:
+                try:
+                    j = json.loads(m.group(0))
+                    desc = str(j.get("desc") or "").strip()
+                    tags = [str(t) for t in (j.get("tags") or [])][:max(1, int(max_tags or 5))]
+                    if desc:
+                        return {"desc": desc, "tags": tags}
+                except Exception:
+                    pass
         client = self._ai_client()
         if not client:
             return None
@@ -404,45 +474,54 @@ class WeChatFavStickers:
 
     # ---------------- 选用 ----------------
     def _ask_pick(self, text: str, candidates: List[dict]) -> Optional[str]:
-        client = self._ai_client()
-        if not client or not candidates:
+        if not candidates:
             return None
-        key, base, model = client
         lines = []
         for i, it in enumerate(candidates):
             desc = it.get("desc") or it.get("store_caption") or it.get("caption") or it.get("package") or "无描述"
             tags = "/".join(it.get("tags") or [])
             lines.append("%d. %s%s" % (i + 1, desc, (" [" + tags + "]") if tags else ""))
-        prompt = "当前聊天上下文：%s\n\n候选表情包：\n%s\n\n请选择最合适的一个。" % (text[:300], "\n".join(lines))
-        body = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": _PICK_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": 400,
-            "stream": False,
-        }
-        req = urllib.request.Request(
-            base + "/chat/completions",
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
-        )
+        prompt = "当前聊天上下文：%s\n\n候选表情包：\n%s\n\n请选择最合适的一个。" % (
+            text[:300], "\n".join(lines))
+        text_out = ""
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            msg = (data.get("choices") or [{}])[0].get("message", {}) or {}
-            # deepseek-flash 是推理模型：最终答案可能在 reasoning_content 里
-            text_out = (msg.get("content") or "").strip()
-            if not text_out:
-                text_out = (msg.get("reasoning_content") or "").strip()
+            from ..harness.ai_bridge import ask as _bridge_ask
+            text_out = str(_bridge_ask(_PICK_SYSTEM, prompt, platform=self.platform.value,
+                                       max_tokens=400) or "").strip()
         except Exception:
-            return None
+            text_out = ""
+        if not text_out:
+            client = self._ai_client()
+            if not client:
+                return None
+            key, base, model = client
+            body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _PICK_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": 400,
+                "stream": False,
+            }
+            req = urllib.request.Request(
+                base + "/chat/completions",
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                msg = (data.get("choices") or [{}])[0].get("message", {}) or {}
+                text_out = (msg.get("content") or "").strip()
+                if not text_out:
+                    text_out = (msg.get("reasoning_content") or "").strip()
+            except Exception:
+                return None
         m = re.search(r"\{.*\}", text_out, re.S)
         if not m:
             return None
         j = None
-        # 推理模型输出里可能出现多个 {}：取最后一个包含 id 的合法 JSON
         for cand in reversed(re.findall(r"\{[^{}]*\}", text_out)):
             try:
                 t = json.loads(cand)
@@ -480,7 +559,7 @@ class WeChatFavStickers:
         wanted = [str(t).strip().lower() for t in (tags or []) if str(t).strip()]
         ctx = str(text or "").lower()
         excl = {str(x).lower() for x in (exclude_md5 or []) if str(x).strip()}
-        items = [x for x in self.load() if x.get("file") and os.path.isfile(x["file"])
+        items = [x for x in self._tag_items() if x.get("file") and os.path.isfile(x["file"])
                  and str(x.get("id") or "").lower() not in excl
                  and os.path.splitext(os.path.basename(x["file"]))[0].lower() not in excl]
         scored = []

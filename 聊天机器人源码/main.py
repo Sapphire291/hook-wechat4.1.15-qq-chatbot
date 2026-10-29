@@ -388,11 +388,24 @@ def main() -> int:
                 pass
         threading.Thread(target=_autostart_wechat, name="wechat-autostart", daemon=True).start()
 
+    def _memory_group_action(action, group):
+        try:
+            agent = getattr(getattr(runtime, "processor", None), "harness", None)
+            agent = getattr(agent, "memory_agent", None)
+            if agent is None:
+                return ""
+            if action == "merge":
+                return agent.merge_now(group)
+            return agent.split_now(group)
+        except Exception as e:
+            return "记忆组操作失败：%r" % (e,)
+
     run_app(config_store, records, bus, controller, config,
             chat_fetcher=make_chat_fetcher(config),
             sticker_fetcher=fetch_faces,
             sticker_favoriter=favorite_last,
             memory_store=getattr(runtime, "memory_store", None),
+            memory_group_action=_memory_group_action,
             plugins=load_plugins(config, config_store, bus, _queue,
                                  runtime.adapters, getattr(runtime, "memory_store", None)))
     return 0

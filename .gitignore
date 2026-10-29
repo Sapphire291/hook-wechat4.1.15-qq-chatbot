@@ -1,56 +1,30 @@
-# ==== 运行时数据（只忽略根级路径，避免误伤 src/memory 等源码模块）====
-/聊天机器人源码/config.json
-/聊天机器人源码/data/
-/聊天机器人源码/memory/
-/聊天机器人源码/WID/
-/聊天机器人源码/EMOJE/
-/聊天机器人源码/logs/
-/聊天机器人源码/backup/
-/聊天机器人源码/wechatauto_logs/
-/聊天机器人源码/runtime/
-/聊天机器人源码/dist/
-/聊天机器人源码/build/
-/聊天机器人源码/.test_tmp/
-/聊天机器人源码/assets/emoji/*
-!/聊天机器人源码/assets/emoji/README.md
+# 敏感配置
+config.json
+config.local.json
+*.key
+*.pem
+.env
 
-# ==== 大文件 / 二进制依赖（建议从 Release 获取）====
-/依赖项/napcat_bundle.zip
-/微信Hook源码/运行库/
-/微信Hook源码/x64/
-/微信Hook源码/x64_Version/
-/微信Hook源码/防止微信自动更新/*.exe
-*.exe
-
-# ==== 构建产物 / 编译中间文件 ====
-*.obj
-*.i
+# 运行数据
+data/
+memory/
+EMOJE/
+WID/
+.test_tmp/
 *.log
-*.tlog
-*.recipe
-*.lastbuildstate
-*.FileListAbsolute.txt
-*.Build.CppClean.log
+
+# Python 缓存与构建
+__pycache__/
+*.py[cod]
+*.pyd
+build/
+dist/
+
+# C++ 构建产物
+x64/
+x64_Version/
 *.pdb
+*.obj
 *.ilk
 *.exp
-*.spec.bak
-
-# ==== 测试 / 缓存 ====
-**/__pycache__/
-*.pyc
-*.pyo
-**/.pytest_cache/
-**/.test_tmp/
-
-# ==== 编辑器 / 系统 ====
-.vscode/
-.idea/
-Thumbs.db
-desktop.ini
-.DS_Store
-
-# ==== 密钥 / 证书 ====
-*.pem
-*.key
-.env
+*.lib

@@ -1,9 +1,0 @@
-# 「聊天机器人」依赖清单
-# 微信接入（UI 自动化，需电脑端已登录微信 4.1，仅 Windows；免费版）
-wxauto4>=4.0.0 ; sys_platform == "win32"
-# QQ 接入（NapCat/OneBot v11，通过 WebSocket 连接）
-websocket-client>=1.7.0
-# DeepSeek 官方 API（OpenAI 兼容的 HTTP 接口）
-requests>=2.31.0
-# 打包成 exe
-pyinstaller>=6.3.0

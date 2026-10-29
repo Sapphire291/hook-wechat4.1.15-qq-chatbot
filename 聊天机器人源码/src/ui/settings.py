@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """设置界面：分平台 AI 配置、白名单（支持从好友/群列表选择）、回复策略等。"""
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import tkinter as tk
+import uuid
 from tkinter import ttk, messagebox, simpledialog
 from typing import Callable, List, Optional
 
@@ -63,10 +64,12 @@ class SettingsPanel(ttk.Frame):
 
     def __init__(self, master, on_save: Optional[Callable[[AppConfig], None]] = None,
                  chat_fetcher=None, sticker_fetcher=None, sticker_favoriter=None,
-                 memory_store=None, wechat_plugin=None, bot_controller=None):
+                 memory_store=None, wechat_plugin=None, bot_controller=None,
+                 memory_group_action=None):
         super().__init__(master, padding=6)
         self.on_save = on_save
         self.bot_controller = bot_controller
+        self.memory_group_action = memory_group_action
         self.chat_fetcher = chat_fetcher
         self.sticker_fetcher = sticker_fetcher
         self.sticker_favoriter = sticker_favoriter
@@ -74,7 +77,8 @@ class SettingsPanel(ttk.Frame):
         self.wechat_plugin = wechat_plugin
         self._qr_photo = None
         self._scroll_pairs = []
-        self._sys_prompts = {}
+        self._memory_groups = []
+        self._wl_original_names = {}
         self._wl_contacts_cache = None
         self._build()
 
@@ -97,9 +101,6 @@ class SettingsPanel(ttk.Frame):
 
         self.sticker_tab = self._make_scrollable("表情包")
         self._build_stickers()
-
-        self.web_tab = self._make_scrollable("联网")
-        self._build_web()
 
         bottom = ttk.Frame(self)
         bottom.pack(side="bottom", fill="x", pady=(8, 0))
@@ -142,8 +143,8 @@ class SettingsPanel(ttk.Frame):
 
     def _build_ai(self, parent, key: str) -> None:
         """构建一个平台的 AI 配置表单（key: 'wx' 或 'qq'）。"""
-        ttk.Label(parent, text="底层提示词（自我层 SELF.md）").pack(anchor="w")
-        ttk.Label(parent, text="每轮注入；保存设置后写回 memory/<平台>/SELF.md",
+        ttk.Label(parent, text="底层提示词（自我层）").pack(anchor="w")
+        ttk.Label(parent, text="每轮注入；绑定 memory/wechatMM/SELF.md 或 QQMM/SELF.md",
                   foreground="#888").pack(anchor="w")
         prompt_frame = ttk.Frame(parent)
         prompt_frame.pack(fill="x", pady=(0, 8))
@@ -354,7 +355,7 @@ class SettingsPanel(ttk.Frame):
         ttk.Button(row, text="检测微信", command=self._wechat_check).pack(side="left")
         ttk.Button(row, text="一键连接", command=self._wechat_connect).pack(side="left", padx=8)
         ttk.Button(row, text="断开", command=self._wechat_disconnect).pack(side="left")
-        ttk.Label(parent, text="（需电脑端微信已登录；微信 4.x 需 WeChat-Hook 的 version.dll）",
+        ttk.Label(parent, text="（需电脑端微信已登录；微信 4.x 需本机注入 hook）",
                   foreground="#888").pack()
 
     def _wechat_check(self) -> None:
@@ -425,6 +426,9 @@ class SettingsPanel(ttk.Frame):
         bar.pack(fill="x")
         ttk.Label(bar, text="当前白名单（机器人会回复以下会话）").pack(side="left")
         ttk.Button(bar, text="删除选中", command=self._remove_whitelist).pack(side="right")
+        ttk.Button(bar, text="解除记忆合并", command=self._unlink_memory_selected).pack(side="right", padx=(0, 6))
+        ttk.Button(bar, text="打通记忆（合并选中会话）",
+                   command=self._link_memory_selected).pack(side="right", padx=(0, 6))
         ttk.Button(bar, text="刷新好友/群并同步ID",
                    command=self._refresh_contacts).pack(side="right", padx=(0, 6))
 
@@ -440,6 +444,12 @@ class SettingsPanel(ttk.Frame):
         sb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.wl_tree.yview)
         self.wl_tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
+
+        self.wl_mem_hint = ttk.Label(self.wl_tab, text="", foreground="#666")
+        self.wl_mem_hint.pack(anchor="w", pady=(4, 0))
+        self.wl_group_preview = ttk.Label(self.wl_tab, text="", foreground="#555",
+                                         wraplength=760, justify="left")
+        self.wl_group_preview.pack(anchor="w", pady=(2, 0))
 
         add_frame = ttk.LabelFrame(self.wl_tab, text="添加白名单")
         add_frame.pack(fill="x")
@@ -904,7 +914,6 @@ class SettingsPanel(ttk.Frame):
             "联系人记忆数: %s（有摘要 %s）" % (d.get("chats"), d.get("summaries")),
             "原始日志行数: %s" % d.get("lines"),
             "摘要总字数: %s" % d.get("summary_chars"),
-            "宪章字数: %s" % d.get("charter"),
             "墨账本: %s 条" % ((d.get("ledger") or {}).get("records")),
         ])
 
@@ -1376,15 +1385,38 @@ class SettingsPanel(ttk.Frame):
     def _fill_whitelist(self, entries: List[WhitelistEntry]) -> None:
         for i in self.wl_tree.get_children():
             self.wl_tree.delete(i)
+        self._wl_original_names = {}
         has_wechat = any(e.platform == Platform.WECHAT for e in entries)
         if has_wechat:
             self._wechat_contacts()  # 触发一次扫描/刷新缓存
         for e in entries:
             self._resolve_wechat_id(e)
+            token = "%s:%s" % (e.platform.value, e.chat_id)
+            self._wl_original_names[token] = e.chat_name
+            display = e.chat_name
+            for g in self._memory_groups:
+                if token in [str(x) for x in (g.get("chats") or [])]:
+                    display = str(g.get("name") or "记忆组")
+                    break
             self.wl_tree.insert("", "end", values=(
                 _PLATFORM_LABELS.get(e.platform, e.platform.value),
-                e.chat_name, e.chat_id, "群聊" if e.is_group else "私聊",
+                display, e.chat_id, "群聊" if e.is_group else "私聊",
             ))
+
+    def _refresh_wl_display(self) -> None:
+        try:
+            for iid in self.wl_tree.get_children():
+                v = self.wl_tree.item(iid, "values")
+                pl = _PLATFORM_VALUES.get(v[0], Platform.QQ)
+                token = "%s:%s" % (pl.value, v[2])
+                display = self._wl_original_names.get(token, v[1])
+                for g in self._memory_groups:
+                    if token in [str(x) for x in (g.get("chats") or [])]:
+                        display = str(g.get("name") or "记忆组")
+                        break
+                self.wl_tree.item(iid, values=(v[0], display, v[2], v[3]))
+        except Exception:
+            pass
 
     def _refresh_contacts(self) -> None:
         chats = self._wechat_contacts(force=True)
@@ -1445,9 +1477,12 @@ class SettingsPanel(ttk.Frame):
         out = []
         for iid in self.wl_tree.get_children():
             v = self.wl_tree.item(iid, "values")
+            pl = _PLATFORM_VALUES.get(v[0], Platform.QQ)
+            token = "%s:%s" % (pl.value, v[2])
             out.append(WhitelistEntry(
-                platform=_PLATFORM_VALUES.get(v[0], Platform.QQ),
-                chat_name=v[1], chat_id=v[2], is_group=(v[3] == "群聊"),
+                platform=pl,
+                chat_name=self._wl_original_names.get(token, v[1]),
+                chat_id=v[2], is_group=(v[3] == "群聊"),
             ))
         return out
 
@@ -1463,6 +1498,123 @@ class SettingsPanel(ttk.Frame):
     def _remove_whitelist(self) -> None:
         for iid in self.wl_tree.selection():
             self.wl_tree.delete(iid)
+
+    # ---- 记忆合并（把多个白名单会话合并为一个记忆/会话；未合并的保持独立） ----
+    def _selected_wl_tokens(self):
+        tokens = []
+        for iid in self.wl_tree.selection():
+            v = self.wl_tree.item(iid, "values")
+            try:
+                pl = _PLATFORM_VALUES.get(v[0], Platform.QQ).value
+            except Exception:
+                pl = "qq"
+            if v[2]:
+                tokens.append("%s:%s" % (pl, v[2]))
+        return tokens
+
+    def _refresh_memory_hint(self) -> None:
+        try:
+            groups = [g for g in self._memory_groups if (g.get("chats") or [])]
+            if not groups:
+                text = "记忆合并：未合并（每个会话独立记忆/会话）"
+            else:
+                parts = ["%s（%d 个会话）" % (g.get("name") or g.get("id"),
+                                             len(g.get("chats") or [])) for g in groups]
+                text = "记忆合并：" + "；".join(parts)
+            self.wl_mem_hint.configure(text=text)
+        except Exception:
+            pass
+
+    def _link_memory_selected(self) -> None:
+        tokens = self._selected_wl_tokens()
+        if len(tokens) < 2:
+            messagebox.showwarning("提示", "请在白名单里选中至少 2 个会话，再点“打通记忆”")
+            return
+        name = simpledialog.askstring("合并记忆", "给合并后的会话起个名字：", parent=self)
+        if not name:
+            return
+        name = name.strip() or "合并会话"
+        # 记录成员是否为群聊，供记忆组 65%/35% 权重使用
+        members = []
+        for iid in self.wl_tree.selection():
+            v = self.wl_tree.item(iid, "values")
+            try:
+                pl = _PLATFORM_VALUES.get(v[0], Platform.QQ).value
+            except Exception:
+                pl = "qq"
+            if v[2]:
+                members.append({"chat": "%s:%s" % (pl, v[2]),
+                                "is_group": (v[3] == "群聊")})
+        for g in self._memory_groups:
+            g["chats"] = [c for c in (g.get("chats") or []) if c not in tokens]
+        self._memory_groups = [g for g in self._memory_groups if g.get("chats")]
+        self._memory_groups.append({"id": uuid.uuid4().hex[:8], "name": name,
+                                    "chats": tokens, "members": members})
+        self._refresh_memory_hint()
+        self._refresh_wl_display()
+        try:
+            self._save()
+            group = self._memory_groups[-1] if self._memory_groups else None
+            if group:
+                self._run_memory_action("merge", dict(group))
+            messagebox.showinfo("已合并", "已把 %d 个会话合并为记忆组「%s」。\n组摘要正在后台生成，完成后会显示在下方。" % (
+                len(tokens), name))
+        except Exception as e:
+            messagebox.showwarning("保存失败", "合并已加入界面但保存失败：%r" % (e,))
+
+    def _unlink_memory_selected(self) -> None:
+        tokens = self._selected_wl_tokens()
+        if not tokens:
+            messagebox.showinfo("提示", "请先选中要解除合并的会话")
+            return
+        affected = []
+        for g in self._memory_groups:
+            if any(c in (g.get("chats") or []) for c in tokens):
+                affected.append(dict(g))
+        for g in self._memory_groups:
+            g["chats"] = [c for c in (g.get("chats") or []) if c not in tokens]
+        self._memory_groups = [g for g in self._memory_groups if g.get("chats")]
+        self._refresh_memory_hint()
+        self._refresh_wl_display()
+        try:
+            self._save()
+            for group in affected:
+                g2 = dict(group)
+                g2["split_tokens"] = [c for c in (group.get("chats") or []) if c in tokens]
+                self._run_memory_action("split", g2)
+            messagebox.showinfo("已解除", "已解除选中会话的记忆合并；记忆正在拆分回各成员。")
+        except Exception as e:
+            messagebox.showwarning("保存失败", "已解除界面状态但保存失败：%r" % (e,))
+
+    def _run_memory_action(self, action: str, group: dict) -> None:
+        """UI 触发立即合并/拆分；后台执行完成后刷新组摘要预览。"""
+        if self.memory_group_action is None:
+            if getattr(self, "wl_group_preview", None) is not None:
+                self.wl_group_preview.configure(text="记忆组预览：未连接运行中的记忆子智能体")
+            return
+
+        def worker():
+            try:
+                text = self.memory_group_action(action, dict(group)) or ""
+            except Exception as exc:
+                text = "记忆组操作失败：%r" % (exc,)
+            try:
+                self.after(0, lambda: self._show_group_preview(group, text))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="memory-group-ui", daemon=True).start()
+
+    def _show_group_preview(self, group: dict, text: str) -> None:
+        try:
+            name = str(group.get("name") or group.get("id") or "记忆组")
+            preview = str(text or "").strip()
+            if len(preview) > 500:
+                preview = preview[:500] + "…"
+            self.wl_group_preview.configure(
+                text=("记忆组「%s」摘要：\n%s" % (name, preview or "（暂无）")))
+        except Exception:
+            pass
 
     def _pick_from_list(self) -> None:
         platform = _PLATFORM_VALUES.get(self.add_platform.get(), Platform.QQ)
@@ -1545,46 +1697,26 @@ class SettingsPanel(ttk.Frame):
     # ------------------------------------------------------------------ #
     # 数据装载 / 收集
     # ------------------------------------------------------------------ #
-    def _self_path(self, key: str) -> str:
-        from ..core.paths import platform_memory_dir
-        return os.path.join(platform_memory_dir("wechat" if key == "wx" else "qq"), "SELF.md")
-
-    def _sync_self_layers(self, cfg: AppConfig) -> None:
-        """保存配置时把 UI 的底层提示词写回各平台 SELF.md，保证立即持续生效。"""
-        from ..core.paths import platform_memory_dir
-        for pv, ai in (("wechat", cfg.wechat_ai), ("qq", cfg.qq_ai)):
-            try:
-                root = platform_memory_dir(pv)
-                os.makedirs(root, exist_ok=True)
-                p = os.path.join(root, "SELF.md")
-                tmp = p + ".tmp"
-                box = getattr(self, ("wx" if pv == "wechat" else "qq") + "_self_prompt", None)
-                if box is not None:
-                    text = box.get("1.0", tk.END).strip()
-                else:
-                    text = str(getattr(ai, "system_prompt", "") or "").strip()
-                with open(tmp, "w", encoding="utf-8") as f:
-                    f.write(text + ("\n" if text else ""))
-                os.replace(tmp, p)
-            except Exception as e:
-                print("[self] sync failed: %r" % (e,), flush=True)
-
     def _load_ai(self, key: str, ai: PlatformAIConfig) -> None:
-        # 底层提示词：只显示 SELF.md
-        self_text = ""
+        # 底层提示词绑定 memory/<平台>MM/SELF.md
+        pv = "wechat" if key == "wx" else "qq"
         try:
-            p = self._self_path(key)
-            if os.path.isfile(p):
-                with open(p, encoding="utf-8") as f:
-                    self_text = f.read().strip()
-        except Exception as e:
-            print("[self] load failed: %r" % (e,), flush=True)
+            mem = self._echo_mem(pv)
+            self_path = os.path.join(mem.root, "SELF.md")
+            content = ""
+            if os.path.isfile(self_path):
+                content = open(self_path, "r", encoding="utf-8").read()
+            if not str(content or "").strip():
+                content = str(ai.system_prompt or "")
+                os.makedirs(mem.root, exist_ok=True)
+                with open(self_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+        except Exception:
+            content = str(ai.system_prompt or "")
         box = getattr(self, f"{key}_self_prompt", None)
         if box is not None:
             box.delete("1.0", tk.END)
-            box.insert("1.0", self_text)
-        # System Prompt 不再在 UI 显示，但仍保留在内存中并原样写回 config.json
-        self._sys_prompts[key] = ai.system_prompt
+            box.insert("1.0", content)
         getattr(self, f"{key}_key").delete(0, tk.END)
         getattr(self, f"{key}_key").insert(0, ai.api_key)
         getattr(self, f"{key}_base").delete(0, tk.END)
@@ -1592,9 +1724,27 @@ class SettingsPanel(ttk.Frame):
         getattr(self, f"{key}_model").set(ai.model)
 
     def _collect_ai(self, key: str) -> PlatformAIConfig:
-        system_prompt = str(self._sys_prompts.get(key, "") or "")
+        box = getattr(self, f"{key}_self_prompt", None)
+        system_prompt = box.get("1.0", tk.END).strip() if box is not None else ""
+        pv = "wechat" if key == "wx" else "qq"
+        try:
+            mem = self._echo_mem(pv)
+            os.makedirs(mem.root, exist_ok=True)
+            with open(os.path.join(mem.root, "SELF.md"), "w", encoding="utf-8") as f:
+                f.write(system_prompt)
+        except Exception:
+            pass
+        # SELF.md 与 config.system_prompt 是两个独立注入层：UI 只改 SELF.md，
+        # config.system_prompt 保持原值单独注入。
+        config_prompt = ""
+        try:
+            if getattr(self, "_cfg", None) is not None:
+                pv2 = "wechat" if key == "wx" else "qq"
+                config_prompt = str(self._cfg.ai_for(Platform(pv2)).system_prompt or "")
+        except Exception:
+            config_prompt = ""
         return PlatformAIConfig(
-            system_prompt=system_prompt,
+            system_prompt=config_prompt,
             api_key=getattr(self, f"{key}_key").get().strip(),
             base_url=getattr(self, f"{key}_base").get().strip() or "https://api.deepseek.com",
             model=getattr(self, f"{key}_model").get().strip() or "deepseek-chat",
@@ -1604,7 +1754,10 @@ class SettingsPanel(ttk.Frame):
         self._cfg = cfg
         self._load_ai("wx", cfg.wechat_ai)
         self._load_ai("qq", cfg.qq_ai)
+        self._memory_groups = [dict(g) for g in (getattr(cfg, "memory_groups", []) or [])
+                               if isinstance(g, dict)]
         self._fill_whitelist(cfg.whitelist)
+        self._refresh_memory_hint()
         self.style_var.set(cfg.reply_style.name)
         self.instruction_entry.configure(state="normal")
         self.instruction_entry.delete(0, tk.END)
@@ -1647,29 +1800,16 @@ class SettingsPanel(ttk.Frame):
         self.memory_budget.insert(0, str(getattr(cfg, "memory_compact_budget_chars", 8000) or 8000))
         self.memory_keep.delete(0, tk.END)
         self.memory_keep.insert(0, str(getattr(cfg, "memory_compact_keep_chars", 4000) or 4000))
-        # 联网检索（阶段 A）
-        self.web_on.set(bool(getattr(cfg, "web_enabled", False)))
-        prov = str(getattr(cfg, "web_provider", "ddg") or "ddg")
-        self.web_provider.set(_WEB_PROVIDER_LABELS.get(prov, _WEB_PROVIDER_NAMES[0]))
-        for ent, val in ((self.web_key, getattr(cfg, "web_api_key", "")),
-                         (self.web_base, getattr(cfg, "web_base_url", ""))):
-            ent.delete(0, tk.END)
-            ent.insert(0, str(val or ""))
-        for box, val in ((self.web_max, getattr(cfg, "web_max_results", 5)),
-                         (self.web_fetch, getattr(cfg, "web_fetch_top", 2)),
-                         (self.web_timeout_box, getattr(cfg, "web_timeout", 8)),
-                         (self.web_budget, getattr(cfg, "web_total_budget", 12)),
-                         (self.web_per_min, getattr(cfg, "web_per_minute", 3)),
-                         (self.web_daily, getattr(cfg, "web_daily_limit", 200))):
-            box.delete(0, tk.END)
-            box.insert(0, str(int(val or 0)))
-        try:
-            self._refresh_web_usage(cfg)
-        except Exception:
-            pass
 
     def collect(self) -> AppConfig:
         cfg = AppConfig()
+        # 保留设置页没有控件的 harness 字段，避免 UI 保存时被默认值覆盖
+        base = getattr(self, "_cfg", None)
+        if base is not None:
+            cfg.harness_enabled = bool(getattr(base, "harness_enabled", True))
+            cfg.harness_backend = str(getattr(base, "harness_backend", "native") or "native")
+            cfg.harness_url = str(getattr(base, "harness_url", "") or "")
+            cfg.harness_timeout = int(getattr(base, "harness_timeout", 30) or 30)
         cfg.wechat_ai = self._collect_ai("wx")
         cfg.qq_ai = self._collect_ai("qq")
         style_name = self.style_var.get()
@@ -1683,6 +1823,7 @@ class SettingsPanel(ttk.Frame):
         except (ValueError, TypeError):
             cfg.frequency_value = 10.0
         cfg.whitelist = self._collect_whitelist()
+        cfg.memory_groups = [dict(g) for g in self._memory_groups]
         cfg.wechat_enabled = self.wechat_on.get()
         cfg.qq_enabled = self.qq_on.get()
         cfg.wechat_hook_enabled = self.hook_send_on.get()
@@ -1715,29 +1856,10 @@ class SettingsPanel(ttk.Frame):
             cfg.memory_compact_keep_chars = max(200, int(self.memory_keep.get()))
         except (ValueError, TypeError):
             cfg.memory_compact_keep_chars = 4000
-        # 联网检索（阶段 A）：默认关闭，只有勾选后才联网
-        cfg.web_enabled = bool(self.web_on.get())
-        cfg.web_provider = _WEB_PROVIDER_VALUES.get(self.web_provider.get(), "ddg")
-        cfg.web_api_key = self.web_key.get().strip()
-        cfg.web_base_url = self.web_base.get().strip()
-
-        def _int_of(box, default, low=0):
-            try:
-                return max(low, int(str(box.get()).strip()))
-            except (ValueError, TypeError):
-                return default
-
-        cfg.web_max_results = _int_of(self.web_max, 5, 1)
-        cfg.web_fetch_top = _int_of(self.web_fetch, 2, 0)
-        cfg.web_timeout = _int_of(self.web_timeout_box, 8, 3)
-        cfg.web_total_budget = _int_of(self.web_budget, 12, 5)
-        cfg.web_per_minute = _int_of(self.web_per_min, 3, 0)
-        cfg.web_daily_limit = _int_of(self.web_daily, 200, 0)
         return cfg
 
     def _save(self) -> None:
         cfg = self.collect()
-        self._sync_self_layers(cfg)
         if self.on_save:
             self.on_save(cfg)
         else:
@@ -1746,12 +1868,7 @@ class SettingsPanel(ttk.Frame):
             for pv in ("wechat", "qq"):
                 self._ledger_obj(pv).record("config.save", "config.json", {
                     "compact_budget": int(getattr(cfg, "memory_compact_budget_chars", 0) or 0),
-                    "compact_keep": int(getattr(cfg, "memory_compact_keep_chars", 0) or 0),
-                    "web_enabled": bool(getattr(cfg, "web_enabled", False))},
+                    "compact_keep": int(getattr(cfg, "memory_compact_keep_chars", 0) or 0)},
                     platform=pv)
-        except Exception:
-            pass
-        try:
-            self._refresh_web_usage(cfg)
         except Exception:
             pass

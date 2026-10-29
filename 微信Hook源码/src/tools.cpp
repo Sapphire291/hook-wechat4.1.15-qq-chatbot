@@ -1,4 +1,4 @@
-#define NOMINMAX
+﻿#define NOMINMAX
 #include <iostream>
 #include <string>
 #include <vector>
@@ -25,25 +25,25 @@ void InitStandardPaths()
     // 获取实际的 AppData 路径
     if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, path) == S_OK)
     {
-        // <用户目录>\AppData\Roaming
+        // %USERPROFILE%\AppData\Roaming
         g_AppDataDir = path;
     }
 
     // 获取实际的 Documents 路径
     if (SHGetFolderPathW(NULL, CSIDL_MYDOCUMENTS, NULL, 0, path) == S_OK)
     {
-        // <用户目录>\Documents
+        // %USERPROFILE%\Documents
         g_DocumentDir = path;
     }
 
     // 获取实际的 Users 路径
     if (SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, 0, path) == S_OK)
     {
-        //<用户目录>
+        //%USERPROFILE%
         g_UsersDir = path;
     }
     
-    //<用户目录>\AppData\Roaming\WxDirDataPath
+    //%USERPROFILE%\AppData\Roaming\WxDirDataPath
     g_MyDir = g_AppDataDir + L"\\WxDirDataPath";
 
     //创建目录

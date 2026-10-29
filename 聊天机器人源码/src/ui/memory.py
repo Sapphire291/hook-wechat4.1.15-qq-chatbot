@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """长期记忆查看/编辑窗口：可查看、添加、修改、删除长期记忆，并可设置记忆文件路径。"""
 from __future__ import annotations
 

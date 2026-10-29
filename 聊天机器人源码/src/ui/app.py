@@ -45,7 +45,7 @@ class ChatBotApp:
     def __init__(self, root: tk.Tk, config_store: ConfigStore, records: RecordsStore,
                  bus: EventBus, bot: BotController, initial_config: AppConfig, chat_fetcher=None,
                  sticker_fetcher=None, sticker_favoriter=None, memory_store=None,
-                 plugins=None):
+                 plugins=None, memory_group_action=None):
         self.root = root
         self.config_store = config_store
         self.records = records
@@ -56,6 +56,7 @@ class ChatBotApp:
         self.sticker_fetcher = sticker_fetcher
         self.sticker_favoriter = sticker_favoriter
         self.memory_store = memory_store
+        self.memory_group_action = memory_group_action
         self.plugins = plugins or []
         self.alert_window = None
         self.input_guard = None
@@ -161,7 +162,8 @@ class ChatBotApp:
                                             sticker_favoriter=self.sticker_favoriter,
                                                                             memory_store=self.memory_store,
                                             wechat_plugin=self._find_wechat_plugin(),
-                                            bot_controller=self.bot)
+                                            bot_controller=self.bot,
+                                            memory_group_action=self.memory_group_action)
         self.notebook.add(self.settings_panel, text="设置")
         self.settings_panel.load(self.config)
         try:
@@ -327,11 +329,12 @@ class ChatBotApp:
 def run_app(config_store: ConfigStore, records: RecordsStore, bus: EventBus,
             bot: BotController, config: AppConfig, chat_fetcher=None,
             sticker_fetcher=None, sticker_favoriter=None,
-            memory_store=None, plugins=None) -> None:
+            memory_store=None, plugins=None, memory_group_action=None) -> None:
     """启动 GUI 主循环。"""
     root = tk.Tk()
     app = ChatBotApp(root, config_store, records, bus, bot, config, chat_fetcher=chat_fetcher,
                      sticker_fetcher=sticker_fetcher, sticker_favoriter=sticker_favoriter,
-                     memory_store=memory_store, plugins=plugins)
+                     memory_store=memory_store, plugins=plugins,
+                     memory_group_action=memory_group_action)
     app.poll()  # 启动周期状态刷新
     root.mainloop()
