@@ -1,0 +1,15 @@
+聊天机器人 — 干净封装
+
+运行：
+1. 编辑 E:\CHAT\聊天机器人\config.json
+2. 把 api_key 换成你自己的 Key
+3. 双击 E:\CHAT\聊天机器人\聊天机器人.exe
+
+源码：
+E:\CHAT\YUANMA\聊天机器人源码
+E:\CHAT\YUANMA\微信Hook源码
+
+说明：
+- 配置里没有账号、白名单、聊天记录、API Key。
+- memory、data、日志、头像、收藏表情等运行数据不在封装内。
+- 首次运行会在 exe 目录自动生成 data、memory 等目录。
